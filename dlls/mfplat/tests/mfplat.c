@@ -427,11 +427,20 @@ static BOOL is_prewin8(void)
     return !pMFCreateMFByteStreamOnStreamEx;
 }
 
+#define CHECK_COUNT(obj,expected) _check_count(obj, expected, __LINE__)
+static void _check_count(IMFAttributes* obj, ULONG expected, int line)
+{
+    UINT32 count = 9999;
+    HRESULT hr;
+    hr = IMFAttributes_GetCount(obj, &count);
+    ok_(__FILE__,line)(hr == S_OK, "IMFAttributes_GetCount failed: 0x%08x.\n", hr);
+    ok_(__FILE__,line)(count == expected, "got %d, expected %d.\n", count, expected);
+}
+
 static void test_MFCreateAttributes(void)
 {
     IMFAttributes *attributes;
     HRESULT hr;
-    UINT32 count;
     PROPVARIANT propvar, ret_propvar;
     GUID key;
     UINT32 uint32_value;
@@ -439,18 +448,11 @@ static void test_MFCreateAttributes(void)
 
     hr = MFCreateAttributes( &attributes, 3 );
     ok(hr == S_OK, "got 0x%08x\n", hr);
-
-    count = 88;
-    hr = IMFAttributes_GetCount(attributes, &count);
-    todo_wine ok(hr == S_OK, "got 0x%08x\n", hr);
-    ok(count == 0, "got %d\n", count);
+    CHECK_COUNT(attributes, 0);
 
     hr = IMFAttributes_SetUINT32(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 123);
     ok(hr == S_OK, "got 0x%08x\n", hr);
-
-    hr = IMFAttributes_GetCount(attributes, &count);
-    todo_wine ok(hr == S_OK, "got 0x%08x\n", hr);
-    todo_wine ok(count == 1, "got %d\n", count);
+    CHECK_COUNT(attributes, 1);
 
     uint32_value = 0xdeadbeef;
     hr = IMFAttributes_GetUINT32(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, &uint32_value);
@@ -464,6 +466,7 @@ static void test_MFCreateAttributes(void)
 
     hr = IMFAttributes_SetUINT64(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 65536);
     ok(hr == S_OK, "IMFAttributes_SetUINT64 failed: 0x%08x.\n", hr);
+    CHECK_COUNT(attributes, 1);
 
     hr = IMFAttributes_GetUINT64(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, &uint64_value);
     ok(hr == S_OK, "IMFAttributes_GetUINT64 failed: 0x%08x.\n", hr);
@@ -536,9 +539,11 @@ static void test_MFCreateAttributes(void)
     hr = IMFAttributes_SetItem(attributes, &DUMMY_GUID3, &propvar);
     ok(hr == S_OK, "IMFAttributes_SetItem failed: 0x%08x.\n", hr);
 
+    CHECK_COUNT(attributes, 3);
     hr = IMFAttributes_DeleteItem(attributes, &DUMMY_GUID2);
     ok(hr == S_OK, "IMFAttributes_DeleteItem failed: 0x%08x.\n", hr);
     key = GUID_NULL;
+    CHECK_COUNT(attributes, 2);
     if (is_prewin8())
         hr = IMFAttributes_GetItemByIndex(attributes, 1, &key, &ret_propvar);
     else
@@ -559,8 +564,10 @@ static void test_MFCreateAttributes(void)
     ok(!PropVariantCompareEx(&propvar, &ret_propvar, 0, 0), "got wrong property.\n");
     ok(IsEqualIID(&key, &DUMMY_GUID1), "got wrong key: %s.\n", wine_dbgstr_guid(&key));
 
+    CHECK_COUNT(attributes, 2);
     hr = IMFAttributes_DeleteItem(attributes, &DUMMY_GUID2);
     ok(hr == S_OK, "IMFAttributes_DeleteItem failed: 0x%08x.\n", hr);
+    CHECK_COUNT(attributes, 2);
 
     IMFAttributes_Release(attributes);
 }
