@@ -587,19 +587,54 @@ static ULONG WINAPI mfattributes_Release(IMFAttributes *iface)
 
     if (!ref)
     {
+        clear_attributes(This);
         HeapFree(GetProcessHeap(), 0, This);
     }
 
     return ref;
 }
 
+static struct mfattribute *mfattributes_find_item(mfattributes *object, REFGUID key, size_t *item_index)
+{
+    size_t index;
+
+    for (index = 0; index < object->count; index++)
+    {
+        if (IsEqualGUID(key, &object->attributes[index].key))
+        {
+            if (item_index)
+                *item_index = index;
+            return &object->attributes[index];
+        }
+    }
+    return NULL;
+}
+
+static HRESULT mfattributes_get_item(mfattributes *object, REFGUID key, PROPVARIANT *value)
+{
+    HRESULT hres;
+    struct mfattribute *attribute = NULL;
+
+    EnterCriticalSection(&object->lock);
+
+    attribute = mfattributes_find_item(object, key, NULL);
+    if (!attribute)
+        hres = MF_E_ATTRIBUTENOTFOUND;
+    else
+        hres = PropVariantCopy(value, &attribute->value);
+
+    LeaveCriticalSection(&object->lock);
+
+    return hres;
+}
+
 static HRESULT WINAPI mfattributes_GetItem(IMFAttributes *iface, REFGUID key, PROPVARIANT *value)
 {
     mfattributes *This = impl_from_IMFAttributes(iface);
 
-    FIXME("%p, %s, %p\n", This, debugstr_guid(key), value);
+    TRACE("(%p, %s, %p)\n", This, debugstr_guid(key), value);
 
-    return E_NOTIMPL;
+    return mfattributes_get_item(This, key, value);
 }
 
 static HRESULT WINAPI mfattributes_GetItemType(IMFAttributes *iface, REFGUID key, MF_ATTRIBUTE_TYPE *type)
@@ -732,13 +767,68 @@ static HRESULT WINAPI mfattributes_GetUnknown(IMFAttributes *iface, REFGUID key,
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI mfattributes_SetItem(IMFAttributes *iface, REFGUID key, REFPROPVARIANT Value)
+static HRESULT mfattributes_set_item(mfattributes *object, REFGUID key, REFPROPVARIANT value)
+{
+    struct mfattribute *attribute = NULL;
+
+    EnterCriticalSection(&object->lock);
+
+    attribute = mfattributes_find_item(object, key, NULL);
+    if (!attribute)
+    {
+        if (!mf_array_reserve((void **)&object->attributes, &object->capacity, object->count + 1,
+                              sizeof(*object->attributes)))
+        {
+            LeaveCriticalSection(&object->lock);
+            return E_OUTOFMEMORY;
+        }
+        object->attributes[object->count].key = *key;
+        attribute = &object->attributes[object->count];
+        object->count++;
+    }
+    else
+        PropVariantClear(&attribute->value);
+
+    PropVariantCopy(&attribute->value, value);
+
+    LeaveCriticalSection(&object->lock);
+
+    return S_OK;
+ }
+
+static BOOL is_type_valid(DWORD type)
+{
+    switch (type)
+    {
+        case MF_ATTRIBUTE_UINT32:
+        case MF_ATTRIBUTE_UINT64:
+        case MF_ATTRIBUTE_DOUBLE:
+        case MF_ATTRIBUTE_GUID:
+        case MF_ATTRIBUTE_STRING:
+        case MF_ATTRIBUTE_BLOB:
+        case MF_ATTRIBUTE_IUNKNOWN:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static HRESULT WINAPI mfattributes_SetItem(IMFAttributes *iface, REFGUID key, REFPROPVARIANT value)
 {
     mfattributes *This = impl_from_IMFAttributes(iface);
 
-    FIXME("%p, %s, %p\n", This, debugstr_guid(key), Value);
+    TRACE("(%p, %s, %p)\n", This, debugstr_guid(key), value);
 
-    return E_NOTIMPL;
+    if (!is_type_valid(value->vt))
+    {
+        PROPVARIANT empty_value;
+
+        PropVariantClear(&empty_value);
+        mfattributes_set_item(This, key, &empty_value);
+        return MF_E_INVALIDTYPE;
+    }
+    else
+        return mfattributes_set_item(This, key, value);
 }
 
 static HRESULT WINAPI mfattributes_DeleteItem(IMFAttributes *iface, REFGUID key)
@@ -907,10 +997,38 @@ static const IMFAttributesVtbl mfattributes_vtbl =
     mfattributes_CopyAllItems
 };
 
-void init_attribute_object(mfattributes *object, UINT32 size)
+HRESULT init_attributes_object(mfattributes *object, UINT32 size)
 {
     object->ref = 1;
     object->IMFAttributes_iface.lpVtbl = &mfattributes_vtbl;
+
+    object->attributes = NULL;
+    object->capacity = size;
+    if (!mf_array_reserve((void **)&object->attributes, &object->capacity, size + 1,
+                          sizeof(*object->attributes)))
+        return E_OUTOFMEMORY;
+
+    InitializeCriticalSection(&object->lock);
+    object->lock.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": IMFAttributes.lock");
+    object->count = 0;
+    return S_OK;
+}
+
+void clear_attributes(mfattributes *object)
+{
+    size_t i;
+
+    EnterCriticalSection(&object->lock);
+
+    for (i = 0; i < object->count; i++)
+        PropVariantClear(&object->attributes[i].value);
+
+    heap_free(&object->attributes);
+
+    LeaveCriticalSection(&object->lock);
+
+    object->lock.DebugInfo->Spare[0] = 0;
+    DeleteCriticalSection(&object->lock);
 }
 
 /***********************************************************************
@@ -926,7 +1044,11 @@ HRESULT WINAPI MFCreateAttributes(IMFAttributes **attributes, UINT32 size)
     if(!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(object, size);
+    if (FAILED(init_attributes_object(object, size)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     *attributes = &object->IMFAttributes_iface;
 
     return S_OK;
@@ -988,6 +1110,7 @@ static ULONG WINAPI mfbytestream_Release(IMFByteStream *iface)
 
     if (!ref)
     {
+        clear_attributes(&This->attributes);
         HeapFree(GetProcessHeap(), 0, This);
     }
 
@@ -1228,7 +1351,11 @@ HRESULT WINAPI MFCreateMFByteStreamOnStream(IStream *stream, IMFByteStream **byt
     if(!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(&object->attributes, 0);
+    if (FAILED(init_attributes_object(&object->attributes, 0)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     object->IMFByteStream_iface.lpVtbl = &mfbytestream_vtbl;
     object->attributes.IMFAttributes_iface.lpVtbl = &mfbytestream_attributes_vtbl;
 
@@ -1299,7 +1426,11 @@ HRESULT WINAPI MFCreateFile(MF_FILE_ACCESSMODE accessmode, MF_FILE_OPENMODE open
     if(!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(&object->attributes, 0);
+    if (FAILED(init_attributes_object(&object->attributes, 0)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     object->IMFByteStream_iface.lpVtbl = &mfbytestream_vtbl;
     object->attributes.IMFAttributes_iface.lpVtbl = &mfbytestream_attributes_vtbl;
 
@@ -1455,6 +1586,7 @@ static ULONG WINAPI mfpresentationdescriptor_Release(IMFPresentationDescriptor *
 
     if (!ref)
     {
+        clear_attributes(&This->attributes);
         HeapFree(GetProcessHeap(), 0, This);
     }
 
@@ -1853,7 +1985,11 @@ static HRESULT WINAPI mfsource_CreatePresentationDescriptor(IMFMediaSource *ifac
     if (!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(&object->attributes, 0);
+    if (FAILED(init_attributes_object(&object->attributes, 0)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     object->IMFPresentationDescriptor_iface.lpVtbl = &mfpresentationdescriptor_vtbl;
 
     *descriptor = &object->IMFPresentationDescriptor_iface;
@@ -2156,6 +2292,7 @@ static ULONG WINAPI mfmediaevent_Release(IMFMediaEvent *iface)
 
     if (!ref)
     {
+        clear_attributes(&This->attributes);
         HeapFree(GetProcessHeap(), 0, This);
     }
 
@@ -2446,7 +2583,11 @@ HRESULT WINAPI MFCreateMediaEvent(MediaEventType type, REFGUID extended_type, HR
     if(!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(&object->attributes, 0);
+    if (FAILED(init_attributes_object(&object->attributes, 0)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     object->IMFMediaEvent_iface.lpVtbl = &mfmediaevent_vtbl;
 
     object->type = type;
@@ -3026,6 +3167,7 @@ static ULONG WINAPI mfsample_Release(IMFSample *iface)
 
     if (!ref)
     {
+        clear_attributes(&This->attributes);
         heap_free(This);
     }
 
@@ -3409,7 +3551,11 @@ HRESULT WINAPI MFCreateSample(IMFSample **sample)
     if(!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(&object->attributes, 0);
+    if (FAILED(init_attributes_object(&object->attributes, 0)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     object->IMFSample_iface.lpVtbl = &mfsample_vtbl;
     *sample = &object->IMFSample_iface;
 

@@ -20,13 +20,24 @@
 #include "mfidl.h"
 #include "mferror.h"
 
+struct mfattribute
+{
+    GUID key;
+    PROPVARIANT value;
+};
+
 typedef struct attributes
 {
     IMFAttributes IMFAttributes_iface;
     LONG ref;
+    CRITICAL_SECTION lock;
+    struct mfattribute *attributes;
+    size_t capacity;
+    size_t count;
 } mfattributes;
 
-extern void init_attribute_object(mfattributes *object, UINT32 size) DECLSPEC_HIDDEN;
+extern HRESULT init_attributes_object(mfattributes *object, UINT32 size) DECLSPEC_HIDDEN;
+extern void clear_attributes(mfattributes *object) DECLSPEC_HIDDEN;
 
 extern void init_system_queues(void) DECLSPEC_HIDDEN;
 extern void shutdown_system_queues(void) DECLSPEC_HIDDEN;

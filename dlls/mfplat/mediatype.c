@@ -95,6 +95,7 @@ static ULONG WINAPI mediatype_Release(IMFMediaType *iface)
 
     if (!refcount)
     {
+        clear_attributes(&media_type->attributes);
         heap_free(media_type);
     }
 
@@ -379,7 +380,11 @@ HRESULT WINAPI MFCreateMediaType(IMFMediaType **media_type)
     if (!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(&object->attributes, 0);
+    if (FAILED(init_attributes_object(&object->attributes, 0)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     object->IMFMediaType_iface.lpVtbl = &mediatypevtbl;
 
     *media_type = &object->IMFMediaType_iface;
@@ -435,6 +440,7 @@ static ULONG WINAPI stream_descriptor_Release(IMFStreamDescriptor *iface)
         if (stream_desc->current_type)
             IMFMediaType_Release(stream_desc->current_type);
         DeleteCriticalSection(&stream_desc->cs);
+        clear_attributes(&stream_desc->attributes);
         heap_free(stream_desc);
     }
 
@@ -834,7 +840,11 @@ HRESULT WINAPI MFCreateStreamDescriptor(DWORD identifier, DWORD count,
     if (!object)
         return E_OUTOFMEMORY;
 
-    init_attribute_object(&object->attributes, 0);
+    if (FAILED(init_attributes_object(&object->attributes, 0)))
+    {
+        heap_free(object);
+        return E_OUTOFMEMORY;
+    }
     object->IMFStreamDescriptor_iface.lpVtbl = &streamdescriptorvtbl;
     object->IMFMediaTypeHandler_iface.lpVtbl = &mediatypehandlervtbl;
     object->identifier = identifier;
