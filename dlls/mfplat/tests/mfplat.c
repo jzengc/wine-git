@@ -45,6 +45,7 @@ DEFINE_GUID(DUMMY_GUID3, 0x12345678,0x1234,0x1234,0x23,0x23,0x23,0x23,0x23,0x23,
 #include "mfreadwrite.h"
 #include "propvarutil.h"
 #include "strsafe.h"
+#include "shlwapi.h"
 
 #include "wine/test.h"
 
@@ -62,6 +63,10 @@ static HRESULT (WINAPI *pMFAddPeriodicCallback)(MFPERIODICCALLBACK callback, IUn
 static HRESULT (WINAPI *pMFRemovePeriodicCallback)(DWORD key);
 
 static const WCHAR mp4file[] = {'t','e','s','t','.','m','p','4',0};
+
+static const byte asf_header[] = {0x30,0x26,0xb2,0x75,0x8e,0x66,0xcf,0x11,
+                                  0xa6,0xd9,0x00,0xaa,0x00,0x62,0xce,0x6c};
+
 
 #define CHECK_REF(obj,ref) _check_ref((IUnknown*)obj, ref, __LINE__)
 static void _check_ref(IUnknown* obj, ULONG ref, int line)
@@ -832,6 +837,11 @@ static void test_MFCreateMFByteStreamOnStream(void)
     IUnknown *unknown;
     HRESULT hr;
     ULONG ref;
+    HANDLE file;
+    static WCHAR asffile[] = {'t','e','s','t','.','a','s','f',0};
+    byte buffer[1024] = {0};
+    ULONG written, read;
+    QWORD length;
 
     if(!pMFCreateMFByteStreamOnStream)
     {
@@ -894,6 +904,72 @@ static void test_MFCreateMFByteStreamOnStream(void)
     IMFAttributes_Release(attributes);
     IMFByteStream_Release(bytestream);
     IStream_Release(stream);
+
+    file = CreateFileW(asffile, GENERIC_READ|GENERIC_WRITE, 0, NULL,
+                       CREATE_ALWAYS, 0, 0);
+    ok(file != INVALID_HANDLE_VALUE, "File creation failed: 0x%08x.\n", GetLastError());
+    WriteFile(file, asf_header, sizeof(asf_header), &written, NULL);
+    CloseHandle(file);
+
+    hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    ok(hr == S_OK, "MFStartup failed: 0x%08x.\n", hr);
+
+    hr = SHCreateStreamOnFileW(asffile, STGM_READ|STGM_FAILIFTHERE|STGM_SHARE_DENY_WRITE, &stream);
+    ok(hr == S_OK, "SHCreateStreamOnFileEx failed: 0x%08x.\n", hr);
+    hr = pMFCreateMFByteStreamOnStream(stream, &bytestream);
+    ok(hr == S_OK, "MFCreateMFByteStreamOnStream failed: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    hr = IMFByteStream_Read(bytestream, buffer, sizeof(buffer), &read);
+    todo_wine ok(hr == S_FALSE, "IMFByteStream_Read returned: 0x%08x.\n", hr);
+    todo_wine ok(read == sizeof(asf_header), "got wrong read length: %d.\n", read);
+    todo_wine ok(!memcmp(buffer, asf_header, sizeof(asf_header)), "got wrong content.\n");
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+    memset(buffer, 0, sizeof(buffer));
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    hr = IMFByteStream_SetLength(bytestream, 200);
+    ok(hr == E_FAIL || broken(hr == S_OK), "IMFByteStream_SetLength should fail: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    IMFByteStream_Release(bytestream);
+    IStream_Release(stream);
+
+    hr = SHCreateStreamOnFileW(asffile, STGM_WRITE|STGM_FAILIFTHERE|STGM_SHARE_DENY_WRITE, &stream);
+    ok(hr == S_OK, "SHCreateStreamOnFileEx failed: 0x%08x.\n", hr);
+    hr = pMFCreateMFByteStreamOnStream(stream, &bytestream);
+    ok(hr == S_OK, "MFCreateMFByteStreamOnStream failed: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    hr = IMFByteStream_Read(bytestream, buffer, sizeof(buffer), &read);
+    todo_wine ok(hr == S_FALSE, "IMFByteStream_Read should fail: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    written = 0xdeadbeef;
+    hr = IMFByteStream_Write(bytestream, asf_header, sizeof(asf_header), &written);
+    todo_wine ok(hr == S_OK, "IMFByteStream_Write failed: 0x%08x.\n", hr);
+    todo_wine ok(written == sizeof(asf_header), "got wrong written length: %d.\n", written);
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+
+    hr = IMFByteStream_SetLength(bytestream, sizeof(asf_header) + 2);
+    ok(hr == S_OK, "IMFByteStream_SetLength failed: 0x%08x.\n", hr);
+    length = 0xdeadbeef;
+    hr = IMFByteStream_GetLength(bytestream, &length);
+    ok(hr == S_OK, "IMFByteStream_GetLength failed: 0x%08x.\n", hr);
+    ok(length == sizeof(asf_header) || broken(length == (sizeof(asf_header) + 2)) /* xp */,
+       "got wrong length: %s.\n", wine_dbgstr_longlong(length));
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+    IMFByteStream_Release(bytestream);
+    IStream_Release(stream);
+    file = CreateFileW(asffile, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, 0);
+    ReadFile(file, buffer, sizeof(buffer), &read, NULL);
+    ok(read == sizeof(asf_header) + 2, "got wrong read length: %d.\n", read);
+    ok(!memcmp(buffer, asf_header, sizeof(asf_header)), "got wrong content.\n");
+    memset(buffer, 0, sizeof(buffer));
+    CloseHandle(file);
+
+    MFShutdown();
+    DeleteFileW(asffile);
 }
 
 static void test_MFCreateFile(void)
@@ -906,6 +982,11 @@ static void test_MFCreateFile(void)
     LONG file_size;
     HANDLE handle;
     static const WCHAR newfilename[] = {'n','e','w','.','m','p','4',0};
+    static const WCHAR asffile[] = {'t','e','s','t','.','a','s','f',0};
+    byte buffer[1024] = {0};
+    byte test_data[] = {0x1,0x2,0x3,0x4};
+    ULONG written, read;
+    QWORD length;
 
     filename = load_resource(mp4file);
 
@@ -988,7 +1069,7 @@ static void test_MFCreateFile(void)
     hr = MFCreateFile(MF_ACCESSMODE_WRITE, MF_OPENMODE_APPEND_IF_EXIST,
                       MF_FILEFLAGS_ALLOW_WRITE_SHARING, filename, &bytestream);
     ok(hr == S_OK, "MFCreateFile failed: 0x%08x.\n", hr);
-    todo_wine CHECK_BS_LEN(bytestream, file_size);
+    CHECK_BS_LEN(bytestream, file_size);
     todo_wine CHECK_BS_POS(bytestream, 0);
     IMFByteStream_Release(bytestream);
     CHECK_FILE_SIZE(filename, file_size);
@@ -1003,15 +1084,103 @@ static void test_MFCreateFile(void)
     hr = MFCreateFile(MF_ACCESSMODE_WRITE, MF_OPENMODE_RESET_IF_EXIST,
                       MF_FILEFLAGS_NONE, filename, &bytestream);
     ok(hr == S_OK, "MFCreateFile failed: 0x%08x.\n", hr);
-    todo_wine CHECK_BS_LEN(bytestream, 0);
+    CHECK_BS_LEN(bytestream, 0);
     todo_wine CHECK_BS_POS(bytestream, 0);
     IMFByteStream_Release(bytestream);
     CHECK_FILE_SIZE(filename, 0);
+
+    handle = CreateFileW(asffile, GENERIC_READ|GENERIC_WRITE, 0, NULL,
+                       CREATE_ALWAYS, 0, 0);
+    ok(handle != INVALID_HANDLE_VALUE, "File creation failed: 0x%08x.\n", GetLastError());
+    WriteFile(handle, asf_header, sizeof(asf_header), &written, NULL);
+    CloseHandle(handle);
+
+    hr = MFCreateFile(MF_ACCESSMODE_READ, MF_OPENMODE_FAIL_IF_NOT_EXIST,
+                      MF_FILEFLAGS_NONE, asffile, &bytestream);
+    ok(hr == S_OK, "MFCreateFile failed: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    read = 0;
+    hr = IMFByteStream_Read(bytestream, buffer, sizeof(buffer), &read);
+    todo_wine ok(hr == S_OK, "IMFByteStream_Read failed: 0x%08x.\n", hr);
+    todo_wine ok(read == sizeof(asf_header), "got wrong read length: %d.\n", read);
+    todo_wine ok(!memcmp(buffer, asf_header, sizeof(asf_header)), "got wrong content.\n");
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+    memset(buffer, 0, sizeof(buffer));
+    hr = IMFByteStream_Write(bytestream, asf_header, sizeof(asf_header), &written);
+    todo_wine ok(hr == E_ACCESSDENIED, "IMFByteStream_Write should fail: 0x%08x.\n", hr);
+    hr = IMFByteStream_SetLength(bytestream, 200);
+    ok(hr == E_FAIL, "IMFByteStream_SetLength should fail: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    IMFByteStream_Release(bytestream);
+
+    hr = MFCreateFile(MF_ACCESSMODE_WRITE, MF_OPENMODE_FAIL_IF_NOT_EXIST,
+                      MF_FILEFLAGS_NONE, asffile, &bytestream);
+    ok(hr == S_OK, "MFCreateFile failed: 0x%08x.\n", hr);
+    hr = IMFByteStream_Read(bytestream, buffer, sizeof(buffer), &read);
+    todo_wine ok(hr == E_ACCESSDENIED, "IMFByteStream_Read should fail: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    written = 0xdeadbeef;
+    hr = IMFByteStream_Write(bytestream, asf_header, sizeof(asf_header), &written);
+    todo_wine ok(hr == S_OK, "IMFByteStream_Write failed: 0x%08x.\n", hr);
+    todo_wine ok(written == sizeof(asf_header), "got wrong written length: %d.\n", written);
+    CHECK_BS_LEN(bytestream, sizeof(asf_header));
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+
+    hr = IMFByteStream_SetLength(bytestream, sizeof(asf_header) + 2);
+    ok(hr == S_OK, "IMFByteStream_SetLength failed: 0x%08x.\n", hr);
+    length = 0xdeadbeef;
+    hr = IMFByteStream_GetLength(bytestream, &length);
+    ok(hr == S_OK, "IMFByteStream_GetLength failed: 0x%08x.\n", hr);
+    ok(length == sizeof(asf_header) || broken(length == (sizeof(asf_header) + 2)) /* xp */,
+       "got wrong length: %s.\n", wine_dbgstr_longlong(length));
+    todo_wine CHECK_BS_POS(bytestream, sizeof(asf_header));
+    IMFByteStream_Release(bytestream);
+    handle = CreateFileW(asffile, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, 0);
+    ReadFile(handle, buffer, sizeof(buffer), &read, NULL);
+    ok(read == sizeof(asf_header) + 2, "got wrong read length: %d.\n", read);
+    ok(!memcmp(buffer, asf_header, sizeof(asf_header)), "got wrong content.\n");
+    memset(buffer, 0, sizeof(buffer));
+    CloseHandle(handle);
+
+    hr = MFCreateFile(MF_ACCESSMODE_WRITE, MF_OPENMODE_APPEND_IF_EXIST,
+                      MF_FILEFLAGS_NONE, asffile, &bytestream);
+    ok(hr == S_OK, "MFCreateFile failed: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    CHECK_BS_LEN(bytestream, sizeof(asf_header) + 2);
+    written = 0xdeadbeef;
+    hr = IMFByteStream_Write(bytestream, test_data, sizeof(test_data), &written);
+    todo_wine ok(hr == S_OK, "IMFByteStream_Write failed: 0x%08x.\n", hr);
+    todo_wine ok(written == sizeof(test_data), "got wrong written length: %d.\n", written);
+    CHECK_BS_LEN(bytestream, sizeof(asf_header) + 2);
+    todo_wine CHECK_BS_POS(bytestream, sizeof(test_data));
+    IMFByteStream_Release(bytestream);
+
+    hr = MFCreateFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_RESET_IF_EXIST,
+                      MF_FILEFLAGS_NONE, asffile, &bytestream);
+    ok(hr == S_OK, "MFCreateFile failed: 0x%08x.\n", hr);
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    CHECK_BS_LEN(bytestream, 0);
+    hr = IMFByteStream_SetLength(bytestream, 1000);
+    ok(hr == S_OK, "IMFByteStream_SetLength failed: 0x%08x.\n", hr);
+    length = 0xdeadbeef;
+    hr = IMFByteStream_GetLength(bytestream, &length);
+    ok(hr == S_OK, "IMFByteStream_GetLength failed: 0x%08x.\n", hr);
+    ok(length == 0 || broken(length == 1000) /* xp */, "got wrong length: %s.\n", wine_dbgstr_longlong(length));
+    todo_wine CHECK_BS_POS(bytestream, 0);
+    read = 0xdeadbeef;
+    hr = IMFByteStream_Read(bytestream, buffer, sizeof(buffer), &read);
+    todo_wine ok(hr == S_OK, "IMFByteStream_Read failed: 0x%08x.\n", hr);
+    todo_wine ok(read == 0 || broken(read == 1000) /* xp */, "got wrong read length: %d.\n", read);
+    memset(buffer, 0, sizeof(buffer));
+    IMFByteStream_Release(bytestream);
 
     MFShutdown();
 
     DeleteFileW(filename);
     DeleteFileW(newfilename);
+    DeleteFileW(asffile);
 }
 
 static void test_system_memory_buffer(void)
